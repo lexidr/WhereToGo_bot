@@ -1,10 +1,15 @@
 import logging
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ConversationHandler
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
+import requests
 import datetime
+import sqlite3
+
+
+con = sqlite3.connect("data\info_of_users.db")
+cur = con.cursor()
 
 BOT_TOKEN = '6032759993:AAFbXq-hofzHYQQtRLAH9XosRZFRajlDKQc'
-
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG
@@ -12,9 +17,31 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-reply_keyboard = [['/show_events', '/films'],
-                  ['/edit']]
+reply_keyboard = [['Концерт', 'Экскурсии'],
+                  ['Кино', 'Театр']]
 markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False)
+
+
+places = {'Концерт': 'concert', 'Кино': 'cinema', 'Театр': 'theatre', 'Экскурсии': 'excursions'}
+
+
+def translate_city(city):
+    data = requests.get(
+        "https://afisha.yandex.ru/api/cities?city=moscow").json()
+    for i in data['data']:
+        if i['name'].lower() == city.lower():
+            return i['id']
+    return None
+
+
+def event(i, age):
+    name = i['event']['title']
+    place = i['scheduleInfo']['oneOfPlaces']['title']
+    address = i['scheduleInfo']['oneOfPlaces']['address']
+    date = i['scheduleInfo']['preview']['text']
+    link = 'https://afisha.yandex.ru' + i['event']['url']
+    text = name + '\n\n' + date + '\n\n' + place + ', ' + address + '\n\n' + link
+    return text
 
 
 async def start(update, context):
@@ -38,14 +65,91 @@ async def enter_age(update, context):
 
 
 async def enter_city(update, context):
-    context.user_data['locality'] = update.message.text
-    await update.message.reply_text("Спасибо! Теперь я смогу подобрать для тебя подходящие мероприятия!)")
-    return 3
+    city = translate_city(update.message.text)
+    if city:
+        context.user_data['locality'] = city
+        cur.execute("""INSERT INTO info(user_name,age,city) VALUES(?,?,?)""",
+                    (update.effective_message.from_user['id'], context.user_data['age'], city))
+        await update.message.reply_text(
+            "Спасибо!\n"
+            "Теперь я смогу подобрать для тебя подходящие мероприятия!\n"
+            "Напиши команду /show_events, чтобы посмотреть мероприятия)"
+        )
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text(
+            "Нет такого города.\n"
+            "Попробуйте ещё раз.\n"
+        )
+        return 2
 
 
 async def show_events(update, context):
-    await update.message.reply_text(f"Вот такие вот мероприятия для {context.user_data['age']} {context.user_data['locality']}")
-    return ConversationHandler.END
+    await update.message.reply_text(f"Какой тип мероприятия тебя интересует?", reply_markup=markup)
+    return 1
+
+
+async def enter_type(update, context):
+    context.user_data['type'] = places[update.message.text]
+    await update.message.reply_text("Теперь расскажи в какие даты ты ищешь мероприятия. Введи первую дату в формате 00.00.0000",
+                                    reply_markup=ReplyKeyboardRemove())
+    return 2
+
+
+async def enter_data_start(update, context):
+    date = update.message.text
+    try:
+        date = datetime.datetime.strptime(date, '%d.%m.%Y')
+        context.user_data['date'] = date.strftime("%Y-%m-%d")
+        await update.message.reply_text('Укажи количество дней, в которые мне искать мероприятия')
+        return 3
+    except Exception as e:
+        await update.message.reply_text('Неверный формат, попробуйте ещё раз')
+        return 2
+
+
+async def enter_data_end(update, context):
+    p = update.message.text
+    if p.isdigit() and int(p) > 0:
+        context.user_data['period'] = p
+        await update.message.reply_text("Спасибо! Теперь я смогу подобрать для тебя подходящие мероприятия!)")
+
+        res = cur.execute("""SELECT city FROM info
+                       WHERE user_name = ?""", (update.effective_message.from_user['id'],)).fetchall()
+        print(res)
+
+        req = "https://afisha.yandex.ru/api/events/rubric/" + context.user_data['type'] + \
+              "?city=" + res[0][0] + '&date=' + context.user_data['date'] \
+              + '&period=' + context.user_data['period']
+        data = requests.get(req).json()['data']
+        if len(data) == 0:
+            await update.message.reply_text(
+                'Подходящих мероприятий не найдено. Чтобы попробовать ещё раз, напишите комнаду /show_events')
+        else:
+            context.user_data['i'] = 0
+            r = event(data[context.user_data['i']], context.user_data['age'])
+            await update.message.reply_text(r)
+            await update.message.reply_text(
+                    'Напишите команду /next, чтобы посмотреть следующее мероприятие, и /stop - для окончания поиска')
+    else:
+        await update.message.reply_text('Неверный формат, попробуйте ещё раз')
+        return 3
+
+
+async def next_event(update, context):
+    res = cur.execute("""SELECT city FROM info
+                WHERE user_name = ?""", (update.effective_message.from_user['id'], )).fetchall()
+    req = "https://afisha.yandex.ru/api/events/rubric/" + context.user_data['type'] + \
+          "?city=" + res[0][0] + '&date=' + context.user_data['date'] \
+          + '&period=' + context.user_data['period']
+    data = requests.get(req).json()['data']
+    context.user_data['i'] += 1
+    if context.user_data['i'] == len(data) - 1:
+        await update.message.reply_text('Это все мероприятия, которые я смог найти')
+        return ConversationHandler.END
+    else:
+        r = event(data[context.user_data['i']], context.user_data['age'])
+        await update.message.reply_text(r)
 
 
 async def edit(update, context):
@@ -61,6 +165,10 @@ async def stop(update, context):
     return ConversationHandler.END
 
 
+async def unknown(update, context):
+    await update.message.reply_text("Простите, я не понимаю команду.    ")
+
+
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
 
@@ -70,7 +178,6 @@ def main():
         states={
             1: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_age)],
             2: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_city)],
-            3: [MessageHandler(filters.TEXT & ~filters.COMMAND, show_events)]
         },
 
         fallbacks=[CommandHandler('stop', stop)]
@@ -87,11 +194,40 @@ def main():
         fallbacks=[CommandHandler('stop', stop)]
     )
 
+    conv_show_events = ConversationHandler(
+        entry_points=[CommandHandler('show_events', show_events)],
+
+        states={
+            1: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_type)],
+            2: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_data_start)],
+            3: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_data_end)],
+            4: [MessageHandler(filters.TEXT & ~filters.COMMAND, next_event)]
+        },
+
+        fallbacks=[CommandHandler('stop', stop)]
+    )
+
+    conv_next = ConversationHandler(
+        entry_points=[CommandHandler('next', next_event)],
+
+        states={
+            1: [MessageHandler(filters.TEXT & ~filters.COMMAND, next_event)]
+        },
+
+        fallbacks=[CommandHandler('stop', stop)]
+    )
+
     application.add_handler(conv_handler)
     application.add_handler(conv_edit)
+    application.add_handler(conv_show_events)
+    application.add_handler(conv_next)
 
     application.add_handler(CommandHandler("show_events", show_events))
     application.add_handler(CommandHandler("help", help))
+    application.add_handler(CommandHandler("next", next_event))
+
+    unknown_handler = MessageHandler(filters.COMMAND, unknown)
+    application.add_handler(unknown_handler)
 
     application.run_polling()
 
