@@ -6,16 +6,23 @@ import datetime
 import sqlite3
 
 
-con = sqlite3.connect("data\info_of_users.db")
+con = sqlite3.connect("data/info_of_users.db")
 cur = con.cursor()
 
 BOT_TOKEN = '6032759993:AAFbXq-hofzHYQQtRLAH9XosRZFRajlDKQc'
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG
-)
+# logging.basicConfig(
+#     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.DEBUG
+# )
 
-logger = logging.getLogger(__name__)
+cur.execute("""CREATE TABLE IF NOT EXISTS info(
+   user_name INT PRIMARY KEY,
+   age INT,
+   city TEXT
+   );
+""")
+
+# logger = logging.getLogger(__name__)
 
 reply_keyboard = [['Концерт', 'Экскурсии'],
                   ['Кино', 'Театр']]
@@ -34,7 +41,7 @@ def translate_city(city):
     return None
 
 
-def event(i, age):
+def event(i):
     name = i['event']['title']
     place = i['scheduleInfo']['oneOfPlaces']['title']
     address = i['scheduleInfo']['oneOfPlaces']['address']
@@ -68,8 +75,16 @@ async def enter_city(update, context):
     city = translate_city(update.message.text)
     if city:
         context.user_data['locality'] = city
-        cur.execute("""INSERT INTO info(user_name,age,city) VALUES(?,?,?)""",
-                    (update.effective_message.from_user['id'], context.user_data['age'], city))
+        res = cur.execute("""SELECT user_name FROM info
+                       WHERE user_name = ?""", (update.effective_message.from_user['id'],)).fetchall()
+        if (res[0][0] is None):
+            cur.execute("""INSERT INTO info(user_name,age,city) VALUES(?,?,?)""",
+                        (update.effective_message.from_user['id'], context.user_data['age'], city))
+            con.commit()
+        else:
+            cur.execute(f"""UPDATE info SET city = '{city}'
+                       WHERE user_name = '{update.effective_message.from_user['id']}'""")
+            con.commit()
         await update.message.reply_text(
             "Спасибо!\n"
             "Теперь я смогу подобрать для тебя подходящие мероприятия!\n"
@@ -125,9 +140,10 @@ async def enter_data_end(update, context):
         if len(data) == 0:
             await update.message.reply_text(
                 'Подходящих мероприятий не найдено. Чтобы попробовать ещё раз, напишите комнаду /show_events')
+            return ConversationHandler.END
         else:
             context.user_data['i'] = 0
-            r = event(data[context.user_data['i']], context.user_data['age'])
+            r = event(data[context.user_data['i']])
             await update.message.reply_text(r)
             await update.message.reply_text(
                     'Напишите команду /next, чтобы посмотреть следующее мероприятие, и /stop - для окончания поиска')
@@ -148,7 +164,7 @@ async def next_event(update, context):
         await update.message.reply_text('Это все мероприятия, которые я смог найти')
         return ConversationHandler.END
     else:
-        r = event(data[context.user_data['i']], context.user_data['age'])
+        r = event(data[context.user_data['i']])
         await update.message.reply_text(r)
 
 
