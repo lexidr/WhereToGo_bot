@@ -183,6 +183,10 @@ async def stop(update, context):
 
 async def unknown(update, context):
     await update.message.reply_text("Простите, я не понимаю команду.    ")
+      
+      
+async def help(update, context):
+    await update.message.reply_text("/start - запуск бота\n/show_events - вывод всех мероприятий\n/help - информация о всех командах\n/edit - редактирование информации о себе")
 
 
 def main():
