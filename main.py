@@ -77,7 +77,7 @@ async def enter_city(update, context):
         context.user_data['locality'] = city
         res = cur.execute("""SELECT user_name FROM info
                        WHERE user_name = ?""", (update.effective_message.from_user['id'],)).fetchall()
-        if (res[0][0] is None):
+        if res is None:
             cur.execute("""INSERT INTO info(user_name,age,city) VALUES(?,?,?)""",
                         (update.effective_message.from_user['id'], context.user_data['age'], city))
             con.commit()
